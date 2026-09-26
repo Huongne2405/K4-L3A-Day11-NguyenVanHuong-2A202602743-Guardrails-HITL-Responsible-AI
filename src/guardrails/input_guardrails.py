@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -51,14 +52,30 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    # NFKC folds visually equivalent Unicode characters.  Category ``Cf``
+    # includes zero-width characters commonly used to split attack phrases.
+    normalized = unicodedata.normalize("NFKC", user_input or "")
+    normalized = "".join(
+        char for char in normalized if unicodedata.category(char) != "Cf"
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"\bignore\s+(?:all\s+)?(?:(?:previous|above|prior)\s+)?instructions?\b",
+        r"\b(?:disregard|forget)\s+(?:all\s+)?(?:previous\s+)?(?:instructions?|rules?|prompt)\b",
+        r"\byou\s+are\s+now\b",
+        r"\b(?:system|developer)\s+(?:prompt|instructions?)\b",
+        r"\breveal\s+(?:your\s+)?(?:instructions?|prompt|secrets?|credentials?)\b",
+        r"\bpretend\s+(?:that\s+)?you\s+are\b",
+        r"\bact\s+as\s+(?:a\s+|an\s+)?(?:unrestricted|jailbroken|evil)\b",
+        r"\b(?:show|output|print)\s+(?:me\s+)?(?:your\s+)?(?:hidden\s+)?(?:prompt|instructions?|config)\b",
+        r"\b(?:bypass|override)\s+(?:the\s+)?(?:safety\s+)?(?:rules?|guardrails?|instructions?)\b",
+        r"\b(?:bỏ\s+qua|quên)\s+(?:mọi\s+)?(?:hướng\s+dẫn|chỉ\s+thị)\b",
+        r"\btiết\s+lộ\s+(?:mật\s+khẩu|khóa\s+api|thông\s+tin\s+nội\s+bộ)\b",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized, re.IGNORECASE):
             return "BLOCK"
     return "ALLOW"
 
@@ -84,14 +101,21 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    normalized = unicodedata.normalize("NFKD", user_input or "").casefold()
+    input_lower = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    def contains_topic(topic: str) -> bool:
+        return re.search(
+            rf"(?<!\w){re.escape(topic.casefold())}(?!\w)", input_lower
+        ) is not None
 
-    pass  # Replace with your implementation
+    if any(contains_topic(topic) for topic in BLOCKED_TOPICS):
+        return "BLOCK"
+    if not any(contains_topic(topic) for topic in ALLOWED_TOPICS):
+        return "BLOCK"
+    return "ALLOW"
 
 
 # ============================================================
@@ -144,14 +168,20 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request because it appears to contain "
+                "an instruction override. I can help with VinBank banking questions."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I can only help with banking-related questions for VinBank."
+            )
+
+        return None
 
 
 # ============================================================

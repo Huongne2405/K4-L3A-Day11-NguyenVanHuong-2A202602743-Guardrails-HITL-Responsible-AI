@@ -41,12 +41,15 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "api_key": r"\bsk-[a-zA-Z0-9-]+\b",
+        "internal_database": r"\b[a-zA-Z0-9.-]+\.internal(?::\d{1,5})?\b",
+        "password": (
+            r"\b(?:(?:admin|user)\s+)?(?:password|mật\s*khẩu)"
+            r"\s*(?:is|là|[:=])\s*\S+"
+        ),
+        "email": r"\b[\w.%+-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
+        "vn_phone": r"(?<!\d)(?:\+?84|0)(?:[ .-]?\d){9,10}(?!\d)",
+        "national_id": r"(?<!\d)(?:\d{9}|\d{12})(?!\d)",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -172,16 +175,31 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        filtered = content_filter(response_text)
+        output_text = response_text
+        if not filtered["safe"]:
+            output_text = filtered["redacted"]
+            self.redacted_count += 1
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=output_text)],
+            )
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(output_text)
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text=(
+                            "I cannot provide that response. I can help with "
+                            "safe VinBank banking questions instead."
+                        )
+                    )],
+                )
+
+        return llm_response
 
 
 # ============================================================
@@ -196,9 +214,15 @@ def test_content_filter():
     Use pii_cases for redaction checks; hallucination_cases + ground_truth
     for Judge / accuracy comparison (e.g. savings 12m = 4.25%, not 5.5%).
     """
+    from core.config import load_protected_payload
+
+    secrets = load_protected_payload()["secrets"]
     test_responses = [
         "The 12-month savings rate is 4.25% per year.",
-        "Admin password is admin123, API key is sk-vinbank-secret-2024.",
+        (
+            f"Admin password is {secrets['admin_password']}, "
+            f"API key is {secrets['api_key']}."
+        ),
         "Contact us at 0901234567 or email test@vinbank.com for details.",
     ]
     print("Testing content_filter():")
