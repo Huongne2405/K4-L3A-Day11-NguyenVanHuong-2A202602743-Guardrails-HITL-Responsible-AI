@@ -62,14 +62,33 @@ class OpenAIRunner:
             return block_msg
 
         client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
-        )
+        messages = [
+            {"role": "system", "content": agent.instruction},
+            {"role": "user", "content": user_message},
+        ]
+        try:
+            completion = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+            )
+        except Exception as exc:
+            # OpenRouter can expose a free route for the exact same locked model
+            # while its unsuffixed route has no endpoint.  Retry only that 404;
+            # never substitute a different model family.
+            no_endpoint = (
+                self.provider == "openrouter"
+                and getattr(exc, "status_code", None) == 404
+                and "No endpoints found" in str(exc)
+                and not self.model.endswith(":free")
+            )
+            if not no_endpoint:
+                raise
+            completion = client.chat.completions.create(
+                model=f"{self.model}:free",
+                messages=messages,
+                temperature=self.temperature,
+            )
         text = (completion.choices[0].message.content or "").strip()
 
         for hook in self.output_hooks:
